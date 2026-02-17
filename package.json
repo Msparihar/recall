@@ -1,0 +1,23 @@
+{
+  "name": "recall",
+  "version": "2.0.0",
+  "description": "Persistent memory MCP server for AI agents — semantic search over stored observations using ChromaDB",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@chroma-core/openai": "^0.1.9",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "chromadb": "^3.3.0",
+    "openai": "^6.22.0"
+  }
+}
