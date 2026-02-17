@@ -11,8 +11,12 @@ import {
   deleteMemory,
   updateMemory,
   listMemories,
+  getContext,
+  listSessions,
+  getSessionMemories,
 } from "./tools.ts";
 import { initChroma } from "./chroma.ts";
+import { generateSessionId, startSession, endSession } from "./session.ts";
 
 const server = new Server(
   { name: "recall", version: "2.0.0" },
@@ -73,6 +77,42 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             enum: ["discovery", "decision", "bugfix", "feature", "change"],
             description: "Filter by memory type (optional)",
+          },
+          max_tokens: {
+            type: "number",
+            description: "Token budget for results. If provided, results are trimmed to fit and response includes tokens_used, max_tokens, truncated fields.",
+          },
+        },
+        required: ["query"],
+      },
+    },
+    {
+      name: "get_context",
+      description:
+        "Retrieve a token-budget-aware context block of relevant memories, formatted for injection into a prompt. Returns a <recall-context> XML block.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          query: {
+            type: "string",
+            description: "Search query — will be matched semantically against stored memories",
+          },
+          max_tokens: {
+            type: "number",
+            description: "Token budget for the context block (default: 2000)",
+          },
+          project: {
+            type: "string",
+            description: "Filter by project name (optional)",
+          },
+          type: {
+            type: "string",
+            enum: ["discovery", "decision", "bugfix", "feature", "change"],
+            description: "Filter by memory type (optional)",
+          },
+          limit: {
+            type: "number",
+            description: "Candidate pool size before token trimming (default: 20)",
           },
         },
         required: ["query"],
@@ -169,6 +209,44 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: [],
       },
     },
+    {
+      name: "list_sessions",
+      description:
+        "List past sessions with summary statistics — memory count, projects touched, types saved. Useful for reviewing activity history.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          limit: {
+            type: "number",
+            description: "Max sessions to return (default: 20)",
+          },
+          offset: {
+            type: "number",
+            description: "Number of sessions to skip for pagination (default: 0)",
+          },
+        },
+        required: [],
+      },
+    },
+    {
+      name: "get_session_memories",
+      description:
+        "Retrieve all memories saved during a specific session, identified by session_id.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          session_id: {
+            type: "string",
+            description: "The session ID to retrieve memories for",
+          },
+          limit: {
+            type: "number",
+            description: "Max memories to return (default: 50)",
+          },
+        },
+        required: ["session_id"],
+      },
+    },
   ],
 }));
 
@@ -197,6 +275,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "list_memories":
         result = await listMemories(args as Parameters<typeof listMemories>[0]);
         break;
+      case "get_context":
+        result = await getContext(args as Parameters<typeof getContext>[0]);
+        break;
+      case "list_sessions":
+        result = await listSessions(args as Parameters<typeof listSessions>[0]);
+        break;
+      case "get_session_memories":
+        result = await getSessionMemories(args as Parameters<typeof getSessionMemories>[0]);
+        break;
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -217,7 +304,22 @@ async function main() {
   // Initialize ChromaDB (starts sidecar server if needed, creates collection)
   await initChroma();
 
+  const sessionId = generateSessionId();
+  await startSession(sessionId);
+
   const transport = new StdioServerTransport();
+
+  // Set onclose BEFORE connecting to capture transport teardown
+  const originalOnclose = transport.onclose;
+  transport.onclose = async () => {
+    try {
+      await endSession(sessionId);
+    } catch (e) {
+      console.error("Session end error:", e);
+    }
+    originalOnclose?.();
+  };
+
   await server.connect(transport);
 }
 

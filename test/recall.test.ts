@@ -4,10 +4,15 @@ import {
   saveMemory,
   searchMemory,
   getMemory,
+  getContext,
   deleteMemory,
   updateMemory,
   listMemories,
+  listSessions,
+  getSessionMemories,
 } from "../src/tools.ts";
+
+const TIMEOUT = 30_000; // 30s per test — embeddings take time
 
 let savedIds: string[] = [];
 
@@ -19,7 +24,7 @@ beforeAll(async () => {
   if (existing.ids.length > 0) {
     await collection.delete({ ids: existing.ids });
   }
-});
+}, TIMEOUT);
 
 afterAll(async () => {
   // Clean up test memories
@@ -28,7 +33,7 @@ afterAll(async () => {
   if (existing.ids.length > 0) {
     await collection.delete({ ids: existing.ids });
   }
-});
+}, TIMEOUT);
 
 describe("save_memory", () => {
   test("saves a memory and returns an ID", async () => {

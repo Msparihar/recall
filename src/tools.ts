@@ -1,4 +1,6 @@
-import { getCollection, IncludeEnum } from "./chroma.ts";
+import { getCollection, getSessionCollection, IncludeEnum } from "./chroma.ts";
+import { estimateTokens, applyTokenBudget, formatContextBlock, type ScoredMemory } from "./tokens.ts";
+import { getSessionId, trackSave } from "./session.ts";
 
 // ──────────────────────────────────────────────
 // save_memory
@@ -13,11 +15,20 @@ export async function saveMemory(args: {
   const type = args.type ?? "discovery";
   const id = `mem_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
+  // Try to get session_id — gracefully degrade if session isn't started
+  let sessionId = "";
+  try {
+    sessionId = getSessionId();
+  } catch {
+    // Session not started — proceed without session tracking
+  }
+
   const metadata: Record<string, string> = {
     type,
     project: args.project ?? "",
     tags: JSON.stringify(args.tags ?? []),
     created_at: new Date().toISOString(),
+    session_id: sessionId,
   };
 
   await collection.upsert({
@@ -25,6 +36,10 @@ export async function saveMemory(args: {
     documents: [args.content],
     metadatas: [metadata],
   });
+
+  if (sessionId) {
+    trackSave(args.project ?? "", type);
+  }
 
   const count = await collection.count();
 
@@ -36,14 +51,15 @@ export async function saveMemory(args: {
 }
 
 // ──────────────────────────────────────────────
-// search_memory
+// Internal helper: queryMemories
+// Returns ScoredMemory[] (with tokens field) sorted by similarity desc.
 // ──────────────────────────────────────────────
-export async function searchMemory(args: {
+async function queryMemories(args: {
   query: string;
   limit?: number;
   project?: string;
   type?: string;
-}): Promise<string> {
+}): Promise<ScoredMemory[]> {
   const collection = await getCollection();
   const nResults = args.limit ?? 10;
 
@@ -71,27 +87,86 @@ export async function searchMemory(args: {
   const metadatas = results.metadatas[0] ?? [];
   const distances = results.distances[0] ?? [];
 
-  if (ids.length === 0) {
-    return JSON.stringify({ results: [], message: "No memories found." });
-  }
-
-  const formatted = ids.map((id, i) => {
+  return ids.map((id, i) => {
     const meta = (metadatas[i] as Record<string, string> | null) ?? {};
     const distance = distances[i] ?? 1;
     // ChromaDB returns L2 distances — convert to a 0-1 similarity score
     const similarity = Math.round((1 / (1 + distance)) * 1000) / 1000;
+    const content = documents[i] ?? "";
     return {
       id,
-      content: documents[i] ?? "",
+      content,
       type: meta.type ?? "",
       project: meta.project || null,
       tags: meta.tags ? JSON.parse(meta.tags) : [],
       similarity,
       created_at: meta.created_at ?? "",
+      tokens: estimateTokens(content),
     };
   });
+}
 
-  return JSON.stringify({ results: formatted, total_searched: ids.length });
+// ──────────────────────────────────────────────
+// search_memory
+// ──────────────────────────────────────────────
+export async function searchMemory(args: {
+  query: string;
+  limit?: number;
+  project?: string;
+  type?: string;
+  max_tokens?: number;
+}): Promise<string> {
+  const memories = await queryMemories({
+    query: args.query,
+    limit: args.limit,
+    project: args.project,
+    type: args.type,
+  });
+
+  if (memories.length === 0) {
+    return JSON.stringify({ results: [], message: "No memories found." });
+  }
+
+  if (args.max_tokens !== undefined) {
+    const { selected, tokensUsed } = applyTokenBudget(memories, args.max_tokens);
+    // Strip internal tokens field before returning
+    const formatted = selected.map(({ tokens: _t, ...rest }) => rest);
+    return JSON.stringify({
+      results: formatted,
+      total_searched: memories.length,
+      tokens_used: tokensUsed,
+      max_tokens: args.max_tokens,
+      truncated: selected.length < memories.length,
+    });
+  }
+
+  // Backward-compatible path: no max_tokens, strip tokens field
+  const formatted = memories.map(({ tokens: _t, ...rest }) => rest);
+  return JSON.stringify({ results: formatted, total_searched: memories.length });
+}
+
+// ──────────────────────────────────────────────
+// get_context
+// ──────────────────────────────────────────────
+export async function getContext(args: {
+  query: string;
+  max_tokens?: number;
+  project?: string;
+  type?: string;
+  limit?: number;
+}): Promise<string> {
+  const limit = args.limit ?? 20;
+  const maxTokens = args.max_tokens ?? 2000;
+
+  const memories = await queryMemories({
+    query: args.query,
+    limit,
+    project: args.project,
+    type: args.type,
+  });
+
+  const { selected } = applyTokenBudget(memories, maxTokens);
+  return formatContextBlock(selected);
 }
 
 // ──────────────────────────────────────────────
@@ -230,5 +305,76 @@ export async function listMemories(args: {
     total_memories: total,
     limit,
     offset,
+  });
+}
+
+// ──────────────────────────────────────────────
+// list_sessions
+// ──────────────────────────────────────────────
+export async function listSessions(args: {
+  limit?: number;
+  offset?: number;
+}): Promise<string> {
+  const sessionCollection = await getSessionCollection();
+
+  const result = await sessionCollection.get({
+    limit: args.limit ?? 20,
+    offset: args.offset ?? 0,
+    include: [IncludeEnum.documents, IncludeEnum.metadatas],
+  });
+
+  const formatted = result.ids.map((id, i) => {
+    const meta = (result.metadatas[i] as Record<string, string> | null) ?? {};
+    return {
+      session_id: id,
+      summary: result.documents[i] ?? "",
+      start_time: meta.start_time ?? "",
+      end_time: meta.end_time ?? "",
+      memory_count: meta.memory_count ? Number(meta.memory_count) : 0,
+      projects: meta.projects ? JSON.parse(meta.projects) : [],
+      types_seen: meta.types_seen ? JSON.parse(meta.types_seen) : [],
+    };
+  });
+
+  return JSON.stringify({
+    sessions: formatted,
+    total: result.ids.length,
+    limit: args.limit ?? 20,
+    offset: args.offset ?? 0,
+  });
+}
+
+// ──────────────────────────────────────────────
+// get_session_memories
+// ──────────────────────────────────────────────
+export async function getSessionMemories(args: {
+  session_id: string;
+  limit?: number;
+}): Promise<string> {
+  const collection = await getCollection();
+
+  const result = await collection.get({
+    where: { session_id: { $eq: args.session_id } },
+    limit: args.limit ?? 50,
+    include: [IncludeEnum.documents, IncludeEnum.metadatas],
+  });
+
+  const formatted = result.ids.map((id, i) => {
+    const meta = (result.metadatas[i] as Record<string, string> | null) ?? {};
+    return {
+      id,
+      content: result.documents[i] ?? "",
+      type: meta.type ?? "",
+      project: meta.project || null,
+      tags: meta.tags ? JSON.parse(meta.tags) : [],
+      created_at: meta.created_at ?? "",
+      session_id: meta.session_id ?? "",
+    };
+  });
+
+  return JSON.stringify({
+    results: formatted,
+    session_id: args.session_id,
+    total: result.ids.length,
   });
 }

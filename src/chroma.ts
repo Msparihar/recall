@@ -5,8 +5,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 
-const CHROMA_PORT = 8321;
-const CHROMA_HOST = "localhost";
+export const CHROMA_PORT = 8321;
+export const CHROMA_HOST = "localhost";
 const DATA_DIR = join(homedir(), ".recall", "chroma_data");
 const COLLECTION_NAME = "memories";
 
@@ -65,6 +65,25 @@ export async function getCollection(): Promise<Collection> {
     throw new Error("ChromaDB not initialized. Call initChroma() first.");
   }
   return _collection;
+}
+
+// ──────────────────────────────────────────────
+// Sessions collection — looked up by metadata filter, no semantic search needed
+// ──────────────────────────────────────────────
+const noopEmbeddingFn = {
+  generate: async (texts: string[]) => texts.map(() => [0.0]),
+};
+let _sessionCollection: Collection | null = null;
+
+export async function getSessionCollection(): Promise<Collection> {
+  if (!_sessionCollection) {
+    const client = new ChromaClient({ host: CHROMA_HOST, port: CHROMA_PORT });
+    _sessionCollection = await client.getOrCreateCollection({
+      name: "sessions",
+      embeddingFunction: noopEmbeddingFn as any,
+    });
+  }
+  return _sessionCollection;
 }
 
 export type { Collection };

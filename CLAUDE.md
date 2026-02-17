@@ -1,7 +1,7 @@
 # Recall — Project Instructions
 
 ## Overview
-Recall is an MCP server that provides persistent memory for AI agents via semantic search. Built with Bun, ChromaDB, and OpenAI embeddings.
+Recall is an MCP server that provides persistent memory for AI agents via semantic search. Built with Bun, ChromaDB, and OpenAI embeddings. 9 tools, session tracking, token-aware retrieval, and auto-capture hooks.
 
 ## Stack
 - **Runtime**: Bun (run TypeScript directly, no build step)
@@ -11,9 +11,21 @@ Recall is an MCP server that provides persistent memory for AI agents via semant
 - **Data**: Persisted at `~/.recall/chroma_data/`
 
 ## Key Files
-- `src/index.ts` — MCP server entry point, tool registration, stdio transport
-- `src/chroma.ts` — ChromaDB lifecycle (sidecar start, collection init)
-- `src/tools.ts` — All 6 tool handlers (save, search, get, delete, update, list)
+- `src/index.ts` — MCP server entry point, 9 tool registrations, session lifecycle
+- `src/chroma.ts` — ChromaDB sidecar lifecycle, memories + sessions collections
+- `src/tools.ts` — All 9 tool handlers (save, search, get_context, get, delete, update, list, list_sessions, get_session_memories)
+- `src/tokens.ts` — Token estimation, budget allocation, context block formatting
+- `src/session.ts` — Session state, generateSessionId, startSession/endSession
+- `hooks/post-tool-use.ts` — PostToolUse auto-capture hook (standalone script, uses raw HTTP)
+- `scripts/context-hook.ts` — SessionStart context injection hook (standalone script, uses raw HTTP)
+- `scripts/demo.ts` — Interactive demo
+
+## Hooks
+Hooks are registered in `~/.claude/settings.json`:
+- `SessionStart` → `scripts/context-hook.ts` (injects relevant memories at session start)
+- `PostToolUse` → `hooks/post-tool-use.ts` (auto-captures git, installs, docker, file changes)
+
+Both hooks communicate with ChromaDB directly via HTTP API, not through the MCP server.
 
 ## Development
 ```bash
@@ -22,17 +34,15 @@ bun run src/index.ts # start MCP server
 bun test             # run tests
 ```
 
-## Testing the MCP Server
-```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}' | bun run src/index.ts
-```
-
 ## Architecture Notes
 - ChromaDB JS client is HTTP-only (no embedded mode) — server spawns it as a sidecar
 - Sidecar checks if already running before spawning (idempotent)
 - OpenAI API key loaded from `.env` in project root (Bun auto-loads)
-- Memory IDs are strings: `mem_{timestamp}_{random}`
-- Tags stored as JSON-stringified arrays in ChromaDB metadata (no native array support)
+- Memory IDs: `mem_{timestamp}_{random}`, auto-captured: `auto_{timestamp}_{random}`
+- Session IDs: `ses_{timestamp}_{random}`
+- Tags stored as JSON-stringified arrays in ChromaDB metadata
+- Sessions collection uses noop embedding function (no semantic search needed)
+- Hooks use ChromaDB v2 API path: `/api/v2/tenants/default_tenant/databases/default_database/...`
 
 ## Conventions
 - Use `bun` not `npm`
