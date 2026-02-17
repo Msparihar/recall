@@ -46,7 +46,7 @@ Recall is a clean-room implementation of agent memory as an MCP server — built
 ### Install
 
 ```bash
-git clone <repo-url> recall
+git clone https://github.com/Msparihar/recall.git
 cd recall
 bun install
 ```
@@ -125,11 +125,34 @@ recall/
 │   ├── index.ts      # MCP server — tool registration and routing
 │   ├── chroma.ts     # ChromaDB client — sidecar lifecycle, collection management
 │   └── tools.ts      # Tool handlers — save, search, get, delete, update, list
+├── test/
+│   └── recall.test.ts  # End-to-end tests for all 6 tools
+├── scripts/
+│   └── demo.ts       # Interactive demo — saves, searches, updates, deletes
 ├── package.json
 ├── tsconfig.json
 ├── SELF-REPORT.md    # Honest assessment — what works, what breaks, costs
+├── LICENSE           # MIT
 └── .env              # OPENAI_API_KEY (not committed)
 ```
+
+## Demo
+
+Run the interactive demo to see all features in action:
+
+```bash
+bun run scripts/demo.ts
+```
+
+This will save 4 memories, run semantic searches, update a memory, delete one, and clean up after itself.
+
+## Tests
+
+```bash
+bun test
+```
+
+Runs end-to-end tests covering all 6 tools: save, search, get, update, delete, and list.
 
 ## Running Locally
 
