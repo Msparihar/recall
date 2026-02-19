@@ -29,6 +29,7 @@ export async function saveMemory(args: {
     tags: JSON.stringify(args.tags ?? []),
     created_at: new Date().toISOString(),
     session_id: sessionId,
+    source: "manual",
   };
 
   await collection.upsert({
@@ -90,8 +91,11 @@ async function queryMemories(args: {
   return ids.map((id, i) => {
     const meta = (metadatas[i] as Record<string, string> | null) ?? {};
     const distance = distances[i] ?? 1;
-    // ChromaDB returns L2 distances — convert to a 0-1 similarity score
-    const similarity = Math.round((1 / (1 + distance)) * 1000) / 1000;
+    // Cosine distance: distance = 1 - cosine_similarity, so similarity = 1 - distance
+    // Boost manual saves slightly over auto-captures for better ranking
+    const isAutoCapture = meta.source === "hook-auto";
+    const sourceBoost = isAutoCapture ? 0 : 0.05;
+    const similarity = Math.round(Math.max(0, Math.min(1, (1 - distance) + sourceBoost)) * 1000) / 1000;
     const content = documents[i] ?? "";
     return {
       id,
@@ -377,4 +381,114 @@ export async function getSessionMemories(args: {
     session_id: args.session_id,
     total: result.ids.length,
   });
+}
+
+// ──────────────────────────────────────────────
+// compact_memories — clean up auto-captured noise
+// ──────────────────────────────────────────────
+export async function compactMemories(args: {
+  max_age_days?: number;
+  dry_run?: boolean;
+}): Promise<string> {
+  const collection = await getCollection();
+  const maxAgeDays = args.max_age_days ?? 30;
+  const dryRun = args.dry_run ?? false;
+  const cutoffDate = new Date(Date.now() - maxAgeDays * 86400000).toISOString();
+
+  // Fetch all auto-captured memories
+  const totalCount = await collection.count();
+  const autoMems = await collection.get({
+    where: { source: { $eq: "hook-auto" } },
+    limit: totalCount,
+    include: [IncludeEnum.documents, IncludeEnum.metadatas],
+  });
+
+  const toDelete: string[] = [];
+  const seen = new Map<string, string>();
+  let oldCount = 0;
+  let dupCount = 0;
+
+  for (let i = 0; i < autoMems.ids.length; i++) {
+    const id = autoMems.ids[i];
+    const meta = (autoMems.metadatas[i] as Record<string, string> | null) ?? {};
+    const content = (autoMems.documents[i] as string) ?? "";
+    const createdAt = meta.created_at ?? "";
+
+    // Remove old auto-captures past TTL
+    if (createdAt && createdAt < cutoffDate) {
+      toDelete.push(id);
+      oldCount++;
+      continue;
+    }
+
+    // Remove exact content duplicates (keep first seen)
+    if (seen.has(content)) {
+      toDelete.push(id);
+      dupCount++;
+    } else {
+      seen.set(content, id);
+    }
+  }
+
+  if (!dryRun && toDelete.length > 0) {
+    const BATCH = 500;
+    for (let i = 0; i < toDelete.length; i += BATCH) {
+      await collection.delete({ ids: toDelete.slice(i, i + BATCH) });
+    }
+  }
+
+  const remaining = dryRun ? totalCount : await collection.count();
+
+  return JSON.stringify({
+    deleted: toDelete.length,
+    old_removed: oldCount,
+    duplicates_removed: dupCount,
+    dry_run: dryRun,
+    cutoff_date: cutoffDate,
+    auto_captured_scanned: autoMems.ids.length,
+    total_memories_remaining: remaining,
+  });
+}
+
+// ──────────────────────────────────────────────
+// export_memories — dump all memories as JSON
+// ──────────────────────────────────────────────
+export async function exportMemories(args: {
+  project?: string;
+  type?: string;
+}): Promise<string> {
+  const collection = await getCollection();
+  const count = await collection.count();
+
+  const conditions: Record<string, unknown>[] = [];
+  if (args.project) conditions.push({ project: { $eq: args.project } });
+  if (args.type) conditions.push({ type: { $eq: args.type } });
+
+  const where =
+    conditions.length === 0
+      ? undefined
+      : conditions.length === 1
+      ? (conditions[0] as Record<string, unknown>)
+      : { $and: conditions };
+
+  const result = await collection.get({
+    limit: count,
+    where: where as any,
+    include: [IncludeEnum.documents, IncludeEnum.metadatas],
+  });
+
+  const formatted = result.ids.map((id, i) => {
+    const meta = (result.metadatas[i] as Record<string, string> | null) ?? {};
+    return {
+      id,
+      content: result.documents[i] ?? "",
+      type: meta.type ?? "",
+      project: meta.project || null,
+      tags: meta.tags ? JSON.parse(meta.tags) : [],
+      created_at: meta.created_at ?? "",
+      source: meta.source ?? "manual",
+    };
+  });
+
+  return JSON.stringify({ memories: formatted, total: formatted.length });
 }

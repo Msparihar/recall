@@ -14,12 +14,14 @@ import {
   getContext,
   listSessions,
   getSessionMemories,
+  compactMemories,
+  exportMemories,
 } from "./tools.ts";
 import { initChroma } from "./chroma.ts";
 import { generateSessionId, startSession, endSession } from "./session.ts";
 
 const server = new Server(
-  { name: "recall", version: "2.0.0" },
+  { name: "recall", version: "3.0.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -247,6 +249,45 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["session_id"],
       },
     },
+    {
+      name: "compact_memories",
+      description:
+        "Clean up auto-captured memory noise. Removes old auto-captures past a TTL and exact content duplicates. Manual saves are never touched.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          max_age_days: {
+            type: "number",
+            description: "Delete auto-captured memories older than this many days (default: 30)",
+          },
+          dry_run: {
+            type: "boolean",
+            description: "If true, report what would be deleted without actually deleting (default: false)",
+          },
+        },
+        required: [],
+      },
+    },
+    {
+      name: "export_memories",
+      description:
+        "Export all memories as a JSON array for backup or migration. Supports filtering by project and type.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          project: {
+            type: "string",
+            description: "Filter by project name (optional)",
+          },
+          type: {
+            type: "string",
+            enum: ["discovery", "decision", "bugfix", "feature", "change"],
+            description: "Filter by memory type (optional)",
+          },
+        },
+        required: [],
+      },
+    },
   ],
 }));
 
@@ -283,6 +324,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "get_session_memories":
         result = await getSessionMemories(args as Parameters<typeof getSessionMemories>[0]);
+        break;
+      case "compact_memories":
+        result = await compactMemories(args as Parameters<typeof compactMemories>[0]);
+        break;
+      case "export_memories":
+        result = await exportMemories(args as Parameters<typeof exportMemories>[0]);
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);
